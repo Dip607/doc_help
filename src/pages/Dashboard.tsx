@@ -33,6 +33,42 @@ import AdminDashboardWidgets from '@/components/RoleDashboard/AdminDashboardWidg
 import EditorDashboardWidgets from '@/components/RoleDashboard/EditorDashboardWidgets';
 import ViewerDashboardWidgets from '@/components/RoleDashboard/ViewerDashboardWidgets';
 
+// --- ECHO COMPONENTS ---
+
+const EchoAura = ({ role, name, isInteracting }: { role: string; name: string; isInteracting?: boolean }) => {
+  const getRoleColor = () => {
+    if (role === 'admin') return "stroke-blue-500 fill-blue-500";
+    if (role === 'editor') return "stroke-indigo-400 fill-indigo-400";
+    return "stroke-slate-400 fill-slate-400";
+  };
+
+  return (
+    <div className="relative group flex items-center justify-center">
+      <div className="absolute -top-10 scale-0 group-hover:scale-100 transition-all duration-200 z-50">
+        <div className="bg-slate-900 text-white text-[8px] font-black uppercase px-2 py-1 rounded-md tracking-tighter shadow-xl border border-white/10 whitespace-nowrap">
+          {name} • {role}
+        </div>
+      </div>
+      <svg width="32" height="32" className="overflow-visible">
+        <defs>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2.5" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        </defs>
+        <circle
+          cx="16"
+          cy="16"
+          r={isInteracting ? "14" : "10"}
+          className={cn("fill-none stroke-2 transition-all duration-700 ease-out animate-pulse", getRoleColor())}
+          style={{ filter: 'url(#glow)' }}
+        />
+        <circle cx="16" cy="16" r="5" className={cn("transition-all duration-500", getRoleColor())} />
+      </svg>
+    </div>
+  );
+};
+
 interface DashboardStats {
   totalDocuments: number;
   totalWords: number;
@@ -60,6 +96,50 @@ export default function Dashboard() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [loadingStats, setLoadingStats] = useState(true);
   const [tourKey, setTourKey] = useState(0);
+  
+  // --- REALTIME PRESENCE STATE ---
+  const [onlineUsers, setOnlineUsers] = useState<any[]>([]);
+  const [interactingUserId, setInteractingUserId] = useState<string | null>(null);
+
+  // --- PRESENCE LOGIC ---
+  useEffect(() => {
+    if (!user || !organization) return;
+
+    const channel = supabase.channel(`org_presence_${organization.id}`, {
+      config: { presence: { key: user.id } },
+    });
+
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        const state = channel.presenceState();
+        const users = Object.values(state).flat();
+        setOnlineUsers(users);
+      })
+      .on('broadcast', { event: 'interaction' }, ({ payload }) => {
+        setInteractingUserId(payload.userId);
+        setTimeout(() => setInteractingUserId(null), 2000);
+      })
+      .subscribe(async (status) => {
+        if (status === 'SUBSCRIBED') {
+          await channel.track({
+            id: user.id,
+            name: profile?.full_name || 'Anonymous',
+            role: isAdmin ? 'admin' : isEditor ? 'editor' : 'viewer',
+            online_at: new Date().toISOString(),
+          });
+        }
+      });
+
+    return () => { channel.unsubscribe(); };
+  }, [user, organization, profile, isAdmin, isEditor]);
+
+  const handleInteraction = async () => {
+    await supabase.channel(`org_presence_${organization?.id}`).send({
+      type: 'broadcast',
+      event: 'interaction',
+      payload: { userId: user?.id },
+    });
+  };
 
   // --- TOUR LOGIC ---
   const handleStartTour = useCallback(() => {
@@ -149,7 +229,6 @@ export default function Dashboard() {
     }
   };
 
-  // --- UI HELPERS ---
   const getRoleDisplay = () => {
     if (isAdmin) return { label: 'Administrator', color: 'bg-blue-600 text-white shadow-lg shadow-blue-500/20' };
     if (isEditor) return { label: 'Editor', color: 'bg-indigo-500/10 text-indigo-600 border-indigo-200' };
@@ -215,9 +294,21 @@ export default function Dashboard() {
           <section className="flex flex-col md:flex-row md:items-end justify-between gap-6">
             <div className="space-y-4">
               <div className="flex flex-wrap items-center gap-3">
+                {/* --- ECHO HUD IMPLEMENTATION --- */}
+                <div className="flex -space-x-2 items-center mr-2 bg-white/50 dark:bg-white/5 p-1.5 rounded-full border border-slate-200 dark:border-white/10 shadow-inner">
+                  {onlineUsers.map((u) => (
+                    <EchoAura 
+                      key={u.id} 
+                      role={u.role} 
+                      name={u.name} 
+                      isInteracting={interactingUserId === u.id}
+                    />
+                  ))}
+                </div>
+
                 <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-blue-500/5 border border-blue-500/10 text-blue-600 text-[9px] font-black uppercase tracking-[0.2em]">
                   <Sparkles className="h-3 w-3" />
-                  <span>AI Nodes Online</span>
+                  <span>{onlineUsers.length} Neural Nodes Online</span>
                 </div>
                 <Badge className={cn("rounded-full px-3 py-0.5 text-[9px] font-black uppercase tracking-widest border-none", role.color)}>
                   {role.label}
@@ -238,7 +329,10 @@ export default function Dashboard() {
             <div className="flex flex-wrap items-center gap-3">
               <TourTrigger onStartTour={handleStartTour} />
               <Button 
-                onClick={() => navigate('/documents/upload')} 
+                onClick={() => {
+                  handleInteraction();
+                  navigate('/documents/upload');
+                }} 
                 size="lg" 
                 data-tour="upload-action"
                 className="shadow-xl shadow-blue-500/20 bg-blue-600 hover:bg-blue-700 text-white font-black uppercase text-[10px] tracking-widest h-12 px-8 rounded-xl transition-all active:scale-95 group"
@@ -249,7 +343,7 @@ export default function Dashboard() {
             </div>
           </section>
 
-          {/* Role-specific Widgets (Admin/Editor/Viewer) */}
+          {/* Role-specific Widgets */}
           <section className="animate-in fade-in duration-700">
             {isAdmin && organization && <AdminDashboardWidgets organizationId={organization.id} />}
             {isEditor && !isAdmin && <EditorDashboardWidgets />}
@@ -291,7 +385,6 @@ export default function Dashboard() {
 
               {/* Advanced Analytics Charts */}
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-                {/* Sentiment Pie */}
                 <Card className="lg:col-span-1 rounded-[2.5rem] border-none shadow-sm bg-white dark:bg-slate-900/50 backdrop-blur-md overflow-hidden">
                   <CardHeader className="p-8 pb-0">
                     <CardTitle className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">Emotional Spectrum</CardTitle>
@@ -327,7 +420,6 @@ export default function Dashboard() {
                   </CardContent>
                 </Card>
 
-                {/* Keyword Bar Chart */}
                 <Card className="lg:col-span-2 rounded-[2.5rem] border-none shadow-sm bg-white dark:bg-slate-900/50 backdrop-blur-md overflow-hidden">
                   <CardHeader className="p-8 pb-0">
                     <CardTitle className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-400">Concept Frequency</CardTitle>
@@ -371,7 +463,10 @@ export default function Dashboard() {
                         <div 
                           key={doc.id}
                           className="group flex items-center justify-between p-6 hover:bg-blue-500/[0.02] transition-all cursor-pointer"
-                          onClick={() => navigate(`/documents/list`)}
+                          onClick={() => {
+                            handleInteraction();
+                            navigate(`/documents/list`);
+                          }}
                         >
                           <div className="flex items-center gap-5">
                             <div className="h-12 w-12 rounded-2xl bg-slate-50 dark:bg-slate-950 flex items-center justify-center border border-slate-100 dark:border-slate-800 group-hover:border-blue-500/30 transition-all">
